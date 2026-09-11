@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>投稿候補の承認</title>
+<!--
+  投稿候補の承認画面。1画面・スマホ向け。
+
+  【何をする画面か】
+  bot が作った投稿候補を並べて、○（そのまま出す）／△（直して出す）／
+  ×（出さない）を押すだけ。押さなければ出ない。
+  上に「採用率」と「編集率」が出る——**直す量が減っていくか**を見るため。
+
+  【設定】初回に Supabase の URL と publishable キーを1度だけ入れる。
+  入れた値はこの端末の localStorage に入り、リポジトリには残らない。
+  **secret キーは絶対に入れないこと。**あれは RLS を通り抜ける。
+
+  【この画面ができないこと】
+  - X へ投稿しない（投稿は翌朝の便が、もう一度検査を通してから出す）
+  - 候補を作らない・消さない（読みと判定の更新だけ）
+  - 自分の行以外は1行も読めない（RLS）
+-->
+<style>
+:root{
+  --bg:#faf9f7; --fg:#1b1a19; --muted:#6b6763; --line:#e5e1dc;
+  --card:#fff; --ok:#1f7a4d; --mid:#a86b1f; --no:#a33; --accent:#2f5fa8;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme=light]){
+    --bg:#17161a; --fg:#eceaf0; --muted:#9b96a3; --line:#332f3a;
+    --card:#201e25; --ok:#5fc08c; --mid:#d9a45a; --no:#e0736f; --accent:#8fb2e8;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.7 -apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+  padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 24px)}
+.wrap{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:17px;margin:0 0 2px;letter-spacing:.02em}
+.sub{color:var(--muted);font-size:13px;margin:0 0 16px}
+.metrics{display:flex;gap:10px;margin:0 0 18px}
+.m{flex:1;background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:10px 12px}
+.m b{display:block;font-size:22px;font-weight:650;letter-spacing:-.01em}
+.m span{color:var(--muted);font-size:12px}
+.warn{background:#fff6e5;border:1px solid #e8cfa0;color:#6b4f16;
+  border-radius:10px;padding:10px 12px;font-size:13px;margin:0 0 16px}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme=light]) .warn{background:#2b2415;border-color:#5b4a24;color:#e6cf9d}
+}
+.slot{margin:0 0 26px}
+.slot>h2{font-size:14px;color:var(--muted);font-weight:600;margin:0 0 8px;
+  display:flex;justify-content:space-between;align-items:baseline}
+.done{color:var(--ok);font-weight:600}
+.opt{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:14px;margin:0 0 10px}
+.opt.sel{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent)}
+.meta{color:var(--muted);font-size:12px;margin:0 0 8px}
+.body{white-space:pre-wrap;word-break:break-word;margin:0 0 12px}
+.btns{display:flex;gap:8px}
+button{flex:1;min-height:46px;border-radius:10px;border:1px solid var(--line);
+  background:transparent;color:var(--fg);font-size:16px;font-weight:600;
+  cursor:pointer;-webkit-tap-highlight-color:transparent}
+button:active{transform:translateY(1px)}
+button.on[data-v="○"]{background:var(--ok);border-color:var(--ok);color:#fff}
+button.on[data-v="△"]{background:var(--mid);border-color:var(--mid);color:#fff}
+button.on[data-v="×"]{background:var(--no);border-color:var(--no);color:#fff}
+textarea{width:100%;min-height:120px;margin:10px 0 0;padding:10px;
+  border:1px solid var(--line);border-radius:10px;background:var(--bg);
+  color:var(--fg);font:inherit;resize:vertical}
+.save{margin:8px 0 0;width:100%;background:var(--accent);border-color:var(--accent);
+  color:#fff}
+.note{color:var(--muted);font-size:12px;margin:6px 0 0}
+.login{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:18px;margin:24px 0}
+input[type=email]{width:100%;min-height:46px;padding:10px;border-radius:10px;
+  border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
+.empty{color:var(--muted);text-align:center;padding:40px 0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>明日の投稿の承認</h1>
+  <p class="sub" id="sub">読み込み中…</p>
+
+  <div class="metrics" id="metrics" hidden>
+    <div class="m"><b id="mAccept">—</b><span>採用率</span></div>
+    <div class="m"><b id="mEdit">—</b><span>編集率</span></div>
+    <div class="m"><b id="mJudged">—</b><span>判定した本数</span></div>
+  </div>
+  <div class="warn" id="gap" hidden></div>
+
+  <div id="setup" class="login" hidden>
+    <p style="margin:0 0 10px">はじめに、つなぎ先を1度だけ入れてください。
+      <br><span class="note">この端末にだけ保存します。secret キーは入れないでください。</span></p>
+    <input type="url" id="cfgUrl" placeholder="https://xxxx.supabase.co" autocomplete="off">
+    <input type="text" id="cfgKey" placeholder="publishable キー" autocomplete="off"
+      style="margin-top:8px">
+    <button class="save" id="cfgSave" style="margin-top:10px">保存する</button>
+  </div>
+
+  <div id="login" class="login" hidden>
+    <p style="margin:0 0 10px">メールでログインします。届いたリンクを開くとこの画面に戻ります。</p>
+    <input type="email" id="email" placeholder="you@example.com" autocomplete="email">
+    <button class="save" id="sendLink" style="margin-top:10px">リンクを送る</button>
+    <p class="note" id="loginNote"></p>
+  </div>
+
+  <div id="list"></div>
+</div>
+
+<script type="module">
+// ── 設定 ───────────────────────────────────────────────────────
+// **リポジトリに値を書かない。**この画面を初めて開いたときに1度だけ入れて
+// もらい、localStorage に置く。公開リポジトリに置いても、鍵も接続先も
+// ファイルには残らない。
+//
+// publishable キーは公開してよいキー（旧 anon の後継）で、置き場所も
+// 送り方も同じ（apikey ヘッダと Bearer）。**secret キーは入れない。**
+const CFGKEY = "xbot.config";
+let CONFIG = { url: "", publishable: "" };
+try {
+  CONFIG = Object.assign(CONFIG, JSON.parse(localStorage.getItem(CFGKEY) || "{}"));
+} catch (e) { /* 消えていてもこのあと入力してもらうだけ */ }
+// 埋め込みたい人のための逃げ道（置いた瞬間に公開される点に注意）
+CONFIG.url = window.SUPABASE_URL || CONFIG.url;
+CONFIG.publishable = window.SUPABASE_PUBLISHABLE_KEY
+  || window.SUPABASE_ANON_KEY || CONFIG.publishable;
+
+const REST = () => CONFIG.url + "/rest/v1";
+const AUTH = () => CONFIG.url + "/auth/v1";
+const KEY = "xbot.session";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => (s ?? "").replace(/[<>&]/g, (c) =>
+  ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+
+let session = null;
+
+// ── セッション ──────────────────────────────────────────────────
+function saveSession(s) {
+  session = s;
+  try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) { /* 個人用の窓なので握って進む */ }
+}
+function loadSession() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get("access_token")) {
+    saveSession({ access_token: h.get("access_token"),
+                  refresh_token: h.get("refresh_token") });
+    history.replaceState(null, "", location.pathname + location.search);
+    return session;
+  }
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) session = JSON.parse(raw);
+  } catch (e) { session = null; }
+  return session;
+}
+
+async function api(path, opt = {}) {
+  const r = await fetch(path, {
+    ...opt,
+    headers: {
+      apikey: CONFIG.publishable,
+      Authorization: "Bearer " + (session ? session.access_token : CONFIG.publishable),
+      "Content-Type": "application/json",
+      ...(opt.headers || {}),
+    },
+  });
+  if (r.status === 401) { session = null; localStorage.removeItem(KEY); throw new Error("ログインが切れています"); }
+  if (!r.ok) throw new Error((await r.text()).slice(0, 200));
+  const t = await r.text();
+  return t ? JSON.parse(t) : null;
+}
+
+$("cfgSave").onclick = () => {
+  const url = $("cfgUrl").value.trim().replace(/\/+$/, "");
+  const key = $("cfgKey").value.trim();
+  if (!url || !key) return;
+  if (/^sb_secret_/.test(key)) {
+    alert("それは secret キーです。publishable キーを入れてください。");
+    return;
+  }
+  CONFIG = { url, publishable: key };
+  try { localStorage.setItem(CFGKEY, JSON.stringify(CONFIG)); } catch (e) { /* 保存できなくても今回は動く */ }
+  location.reload();
+};
+
+$("sendLink").onclick = async () => {
+  const email = $("email").value.trim();
+  if (!email) return;
+  $("loginNote").textContent = "送信中…";
+  try {
+    await fetch(AUTH() + "/otp", {
+      method: "POST",
+      headers: { apikey: CONFIG.publishable, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, create_user: false }),
+    });
+    $("loginNote").textContent = "メールを送りました。リンクを開いてください。";
+  } catch (e) { $("loginNote").textContent = "送れませんでした: " + e.message; }
+};
+
+// ── 物差し（scripts/style_metrics.py と同じ数え方）──────────────────
+function distance(a, b) {
+  a = a || ""; b = b || "";
+  if (a === b) return 0;
+  if (!a || !b) return a.length || b.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur.push(Math.min(prev[j] + 1, cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+const rateOf = (a, b) => {
+  const n = Math.max((a || "").length, (b || "").length);
+  return n ? distance(a, b) / n : 0;
+};
+const pickedText = (r) => {
+  const opts = r.options || [];
+  const hit = opts.find((o) => (o.id || "").toUpperCase()
+    === (r.choice || "").toUpperCase());
+  return (hit || opts[0] || {}).text || "";
+};
+
+function renderMetrics(rows) {
+  let ok = 0, judged = 0, none = 0;
+  const rates = [];
+  for (const r of rows) {
+    const v = r.verdict;
+    if (v === "○" || v === "選") { ok++; judged++; rates.push(0); }
+    else if (v === "△") { judged++; if (r.final_text) rates.push(rateOf(pickedText(r), r.final_text)); }
+    else if (v === "×") { judged++; }
+    else none++;
+  }
+  $("metrics").hidden = false;
+  $("mAccept").textContent = judged ? Math.round(100 * ok / judged) + "%" : "—";
+  $("mEdit").textContent = rates.length
+    ? Math.round(100 * rates.reduce((a, b) => a + b, 0) / rates.length) + "%" : "—";
+  $("mJudged").textContent = judged + " 本";
+  // 未反応は0%ではなく欠測。混ぜると1週目と2週目を比べられない
+  $("gap").hidden = !(none > judged);
+  $("gap").textContent = "未反応が " + none + " 本あります。"
+    + "未反応は0%ではなく欠測なので、この数字はまだ基準値に使えません。";
+}
+
+// ── 一覧 ───────────────────────────────────────────────────────
+const LABEL = { morning: "朝枠", night: "夜枠" };
+
+function card(row, o) {
+  const sel = (row.choice || "").toUpperCase() === (o.id || "").toUpperCase();
+  const bits = [o.kind_name, o.theme ? "種「" + o.theme + "」" : null,
+    (o.weighted_len || 0) + "字",
+    o.score != null ? "機械 " + o.score + "点" : null].filter(Boolean);
+  return `<div class="opt ${sel ? "sel" : ""}" data-opt="${esc(o.id)}">
+    <div class="meta">${esc(o.id)} ・ ${esc(bits.join(" / "))}</div>
+    <div class="body">${esc(o.text)}</div>
+    <div class="btns">
+      ${["○", "△", "×"].map((v) => `<button data-v="${v}"
+        class="${sel && (row.verdict === v || (v === "○" && row.verdict === "選")) ? "on" : ""}">${v}</button>`).join("")}
+    </div>
+    <div data-edit hidden>
+      <textarea placeholder="直した本文をここに書く（💦 や () はそのままで大丈夫です）">${esc(sel && row.verdict === "△" ? (row.final_text || o.text) : o.text)}</textarea>
+      <button class="save">この文で決定</button>
+    </div>
+  </div>`;
+}
+
+function render(rows) {
+  renderMetrics(rows);
+  const pending = rows.filter((r) => !r.verdict);
+  const show = pending.length ? pending : rows.slice(-2);
+  $("sub").textContent = pending.length
+    ? "○ をひとつ選ぶと、その1本を出します。何も押さなければ出しません。"
+    : "いまは判定待ちがありません。直近の2件を出しています。";
+  if (!rows.length) {
+    $("list").innerHTML = `<p class="empty">まだ候補がありません。<br>夜の便が作ると、ここに並びます。</p>`;
+    return;
+  }
+  $("list").innerHTML = show.map((r) => `
+    <section class="slot" data-date="${r.date}" data-slot="${r.slot}">
+      <h2><span>${r.date} ${LABEL[r.slot] || r.slot}</span>
+        ${r.verdict ? `<span class="done">${esc(r.verdict)}${r.choice ? " " + esc(r.choice) : ""}</span>` : ""}</h2>
+      ${(r.options || []).map((o) => card(r, o)).join("")}
+    </section>`).join("");
+}
+
+// ── 判定を書く ──────────────────────────────────────────────────
+async function put(date, slot, verdict, choice, final) {
+  await api(`${REST()}/xbot_proposals?date=eq.${date}&slot=eq.${slot}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({
+      verdict, choice, final_text: final || null,
+      decided_at: new Date().toISOString(),
+    }),
+  });
+}
+
+$("list").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button");
+  if (!btn) return;
+  const opt = btn.closest("[data-opt]");
+  const sec = btn.closest("[data-date]");
+  if (!opt || !sec) return;
+  const { date, slot } = sec.dataset;
+  const id = opt.dataset.opt;
+  const edit = opt.querySelector("[data-edit]");
+
+  if (btn.classList.contains("save")) {
+    const t = opt.querySelector("textarea").value.trim();
+    if (!t) return;
+    btn.disabled = true; btn.textContent = "保存中…";
+    try { await put(date, slot, "△", id, t); await refresh(); }
+    catch (e) { btn.disabled = false; btn.textContent = "この文で決定"; alert(e.message); }
+    return;
+  }
+  const v = btn.dataset.v;
+  if (!v) return;
+  if (v === "△") {                        // 直す欄を開くだけ。保存は「決定」で
+    edit.hidden = !edit.hidden;
+    opt.querySelectorAll("[data-v]").forEach((b) => b.classList.toggle("on", b === btn && !edit.hidden));
+    return;
+  }
+  btn.disabled = true;
+  try { await put(date, slot, v, id, null); await refresh(); }
+  catch (e) { btn.disabled = false; alert(e.message); }
+});
+
+// ── 起動 ───────────────────────────────────────────────────────
+async function refresh() {
+  const rows = await api(`${REST()}/xbot_proposals?order=date.asc,slot.asc`);
+  render(rows || []);
+}
+
+(async () => {
+  if (!CONFIG.url || !CONFIG.publishable) {
+    $("setup").hidden = false;
+    $("sub").textContent = "つなぎ先を入れてください。";
+    return;
+  }
+  loadSession();
+  if (!session) { $("login").hidden = false; $("sub").textContent = "ログインしてください。"; return; }
+  try { await refresh(); }
+  catch (e) {
+    $("login").hidden = false;
+    $("sub").textContent = "読み込めませんでした: " + e.message;
+  }
+})();
+</script>
+</body>
+</html>
