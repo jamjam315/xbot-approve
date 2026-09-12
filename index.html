@@ -106,6 +106,9 @@ input[type=email]{width:100%;min-height:46px;padding:10px;border-radius:10px;
     <input type="email" id="email" placeholder="you@example.com" autocomplete="email">
     <button class="save" id="sendLink" style="margin-top:10px">リンクを送る</button>
     <p class="note" id="loginNote"></p>
+    <p class="note">戻り先: <code id="redirectHere"></code><br>
+      これが Supabase の Redirect URLs に入っていないと、リンクが
+      別の場所へ飛びます。</p>
   </div>
 
   <div id="list"></div>
@@ -132,6 +135,23 @@ CONFIG.publishable = window.SUPABASE_PUBLISHABLE_KEY
 const REST = () => CONFIG.url + "/rest/v1";
 const AUTH = () => CONFIG.url + "/auth/v1";
 const KEY = "xbot.session";
+
+// マジックリンクの戻り先。**このページ自身の URL に固定する。**
+//
+// 渡さないと Supabase が Site URL に落ちる。既定のままだと localhost、
+// 直しても origin（https://…github.io）止まりで、/xbot-approve/ に
+// 戻ってこない＝404 になる（2026-09-12 に実際そうなった）。
+//
+// location.origin は使わない。**それが今回の原因**。
+// new URL(".", …) はこのページが置かれている階層を返すので、
+//   /xbot-approve/           → /xbot-approve/
+//   /xbot-approve/index.html → /xbot-approve/
+// どちらでも同じ場所に戻る。手元の file:// でも壊れない。
+//
+// **Supabase 側の許可リストに同じ URL が要る**（Authentication →
+// URL Configuration → Redirect URLs）。載っていないと、渡しても
+// 黙って Site URL に落ちる。
+const PAGE = new URL(".", location.href).href;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => (s ?? "").replace(/[<>&]/g, (c) =>
@@ -193,11 +213,21 @@ $("sendLink").onclick = async () => {
   if (!email) return;
   $("loginNote").textContent = "送信中…";
   try {
-    await fetch(AUTH() + "/otp", {
-      method: "POST",
-      headers: { apikey: CONFIG.publishable, "Content-Type": "application/json" },
-      body: JSON.stringify({ email, create_user: false }),
-    });
+    // redirect_to はクエリで渡す（GoTrue の作法。supabase-js も同じ）。
+    const r = await fetch(
+      AUTH() + "/otp?redirect_to=" + encodeURIComponent(PAGE), {
+        method: "POST",
+        headers: { apikey: CONFIG.publishable,
+                   "Content-Type": "application/json" },
+        body: JSON.stringify({ email, create_user: false }),
+      });
+    // **返事を見る。**前は成否に関係なく「送りました」と出していたので、
+    // 許可リストに載っていない・ユーザーが居ない、が黙って通っていた。
+    if (!r.ok) {
+      const t = await r.text();
+      $("loginNote").textContent = "送れませんでした: " + t.slice(0, 160);
+      return;
+    }
     $("loginNote").textContent = "メールを送りました。リンクを開いてください。";
   } catch (e) { $("loginNote").textContent = "送れませんでした: " + e.message; }
 };
@@ -340,6 +370,7 @@ async function refresh() {
 }
 
 (async () => {
+  $("redirectHere").textContent = PAGE;
   if (!CONFIG.url || !CONFIG.publishable) {
     $("setup").hidden = false;
     $("sub").textContent = "つなぎ先を入れてください。";
