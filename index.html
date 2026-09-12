@@ -82,6 +82,18 @@ textarea{width:100%;min-height:120px;margin:10px 0 0;padding:10px;
 input[type=email]{width:100%;min-height:46px;padding:10px;border-radius:10px;
   border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
 .empty{color:var(--muted);text-align:center;padding:40px 0}
+/* 次の投稿予定（2026-09-13）。○か△で決めて、まだ出ていない本 */
+.next{background:var(--card);border:1px solid var(--accent);border-radius:14px;
+  padding:12px 14px;margin:0 0 18px}
+.next h3{font-size:13px;color:var(--accent);margin:0 0 6px;font-weight:650}
+.next .when{font-weight:650;font-size:15px}
+.next .body{margin:4px 0 0}
+.next .item+.item{border-top:1px solid var(--line);margin-top:10px;padding-top:10px}
+.next .none{color:var(--muted);font-size:13px}
+.deadline{color:var(--muted);font-weight:400;font-size:12px}
+.expired-head{font-size:13px;color:var(--mid);margin:30px 0 10px;
+  padding-top:14px;border-top:1px dashed var(--line)}
+.slot.expired .opt{opacity:.78}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -89,6 +101,9 @@ input[type=email]{width:100%;min-height:46px;padding:10px;border-radius:10px;
 <div class="wrap">
   <h1>明日の投稿の承認</h1>
   <p class="sub" id="sub">読み込み中…</p>
+
+  <div class="next" id="next" hidden></div>
+  <div class="warn" id="missed" hidden></div>
 
   <div class="metrics" id="metrics" hidden>
     <div class="m"><b id="mAccept">—</b><span>採用率</span></div>
@@ -285,8 +300,52 @@ function renderMetrics(rows) {
     + "未反応は0%ではなく欠測なので、この数字はまだ基準値に使えません。";
 }
 
-// ── 一覧 ───────────────────────────────────────────────────────
+// ── 締切と投稿予定（2026-09-13）──────────────────────────────────
+// 投稿予定の時刻＝承認の締切。bot が候補に post_at / window_end を
+// 書き写してある（scripts/approve.py の times_of）。**締切の判定の正本は
+// bot 側**で、ここは見せるだけ。締切を過ぎて押した ○△ は投稿されず、
+// 採用率・編集率にだけ入る。
 const LABEL = { morning: "朝枠", night: "夜枠" };
+const APPROVED = ["○", "△", "選"];
+const todayJST = () => new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
+const timesOf = (r) => {
+  const o = (r.options || []).find((x) => x.post_at) || null;
+  return o ? { post: new Date(o.post_at), end: new Date(o.window_end || o.post_at) } : null;
+};
+const expired = (r) => {
+  const t = timesOf(r);
+  // 時刻を持たない行は 2026-09-13 朝枠までの古い行だけ。どれももう締切を過ぎている
+  return t ? Date.now() > t.post.getTime() : r.date <= todayJST();
+};
+const lateVerdict = (r) => {
+  const t = timesOf(r);
+  if (!t) return r.date <= todayJST();
+  return !r.decided_at || new Date(r.decided_at) > t.post;
+};
+const posted = (r) => (r.options || []).some((o) => o.posted_at);
+const finalText = (r) => (r.verdict === "△" && r.final_text) ? r.final_text : pickedText(r);
+const fmt = (d) => d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo",
+  month: "numeric", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" });
+
+function renderNext(rows) {
+  const now = Date.now();
+  const ok = rows.filter((r) => APPROVED.includes(r.verdict) && !lateVerdict(r) && !posted(r));
+  const next = ok.filter((r) => { const t = timesOf(r); return t && now <= t.end.getTime(); })
+    .sort((a, b) => timesOf(a).post - timesOf(b).post);
+  $("next").hidden = false;
+  $("next").innerHTML = `<h3>次の投稿予定</h3>` + (next.length
+    ? next.map((r) => `<div class="item">
+        <div class="when">${esc(fmt(timesOf(r).post))}ごろ ・ ${esc(LABEL[r.slot] || r.slot)}</div>
+        <div class="body">${esc(finalText(r))}</div></div>`).join("")
+      + `<p class="note">GitHub の混雑で、この時刻より遅れて出ることがあります。</p>`
+    : `<p class="none">まだありません。締切までに ○ か △ を押すと、ここに出ます。</p>`);
+  // 締切までに決めたのに、枠が終わっても出た印が無い（直近1日だけ見る）
+  const missed = ok.filter((r) => { const t = timesOf(r);
+    return t && now > t.end.getTime() && now - t.end.getTime() < 24 * 3600e3; });
+  $("missed").hidden = !missed.length;
+  $("missed").textContent = missed.map((r) => `${r.date} ${LABEL[r.slot] || r.slot}`).join("、")
+    + " は承認しましたが、出た記録がありません（便が飛んだか、直した文が検査に当たりました）。";
+}
 
 function card(row, o) {
   const sel = (row.choice || "").toUpperCase() === (o.id || "").toUpperCase();
@@ -316,23 +375,42 @@ function card(row, o) {
   </div>`;
 }
 
+function section(r, isExpired) {
+  const t = timesOf(r);
+  const dl = t && !isExpired ? `<span class="deadline">締切 ${esc(fmt(t.post))}</span>` : "";
+  return `
+    <section class="slot ${isExpired ? "expired" : ""}" data-date="${r.date}" data-slot="${r.slot}"
+      data-expired="${isExpired ? 1 : 0}">
+      <h2><span>${r.date} ${LABEL[r.slot] || r.slot} ${dl}</span>
+        ${r.verdict ? `<span class="done">${esc(r.verdict)}${r.choice ? " " + esc(r.choice) : ""}${r.verdict !== "×" && lateVerdict(r) ? "（計測のみ）" : ""}</span>` : ""}</h2>
+      ${(r.options || []).map((o) => card(r, o)).join("")}
+    </section>`;
+}
+
 function render(rows) {
+  renderNext(rows);
   renderMetrics(rows);
+  // 判定待ちは**何日経っても残す**（2026-09-13）。締切の前と後で分ける。
   const pending = rows.filter((r) => !r.verdict);
-  const show = pending.length ? pending : rows.slice(-2);
-  $("sub").textContent = pending.length
-    ? "○ をひとつ選ぶと、その1本を出します。何も押さなければ出しません。"
-    : "いまは判定待ちがありません。直近の2件を出しています。";
+  const open = pending.filter((r) => !expired(r));
+  const old = pending.filter((r) => expired(r)).reverse();   // 新しい順
+  $("sub").textContent = open.length
+    ? "○ をひとつ選ぶと、その1本を締切の時刻に出します。何も押さなければ出しません。"
+    : pending.length
+      ? "締切前の候補はありません。締切を過ぎた候補は、押すと計測にだけ使います。"
+      : "いまは判定待ちがありません。直近の2件を出しています。";
   if (!rows.length) {
     $("list").innerHTML = `<p class="empty">まだ候補がありません。<br>夜の便が作ると、ここに並びます。</p>`;
     return;
   }
-  $("list").innerHTML = show.map((r) => `
-    <section class="slot" data-date="${r.date}" data-slot="${r.slot}">
-      <h2><span>${r.date} ${LABEL[r.slot] || r.slot}</span>
-        ${r.verdict ? `<span class="done">${esc(r.verdict)}${r.choice ? " " + esc(r.choice) : ""}</span>` : ""}</h2>
-      ${(r.options || []).map((o) => card(r, o)).join("")}
-    </section>`).join("");
+  if (!pending.length) {
+    $("list").innerHTML = rows.slice(-2).map((r) => section(r, expired(r))).join("");
+    return;
+  }
+  $("list").innerHTML = open.map((r) => section(r, false)).join("")
+    + (old.length ? `<p class="expired-head">締切を過ぎた候補（${old.length}件）<br>
+        <span class="note">押しても投稿しません。採用率・編集率には入ります。</span></p>` : "")
+    + old.map((r) => section(r, true)).join("");
 }
 
 // ── 判定を書く ──────────────────────────────────────────────────
@@ -356,10 +434,13 @@ $("list").addEventListener("click", async (ev) => {
   const { date, slot } = sec.dataset;
   const id = opt.dataset.opt;
   const edit = opt.querySelector("[data-edit]");
+  // 締切を過ぎた候補の ○△ は投稿されない。押す前に一言だけ確かめる。
+  const lateOk = () => sec.dataset.expired !== "1"
+    || confirm("締切を過ぎているので投稿しません。採用率・編集率の計測にだけ使います。よいですか？");
 
   if (btn.classList.contains("save")) {
     const t = opt.querySelector("textarea").value.trim();
-    if (!t) return;
+    if (!t || !lateOk()) return;
     btn.disabled = true; btn.textContent = "保存中…";
     try { await put(date, slot, "△", id, t); await refresh(); }
     catch (e) { btn.disabled = false; btn.textContent = "この文で決定"; alert(e.message); }
@@ -372,6 +453,7 @@ $("list").addEventListener("click", async (ev) => {
     opt.querySelectorAll("[data-v]").forEach((b) => b.classList.toggle("on", b === btn && !edit.hidden));
     return;
   }
+  if (v === "○" && !lateOk()) return;
   btn.disabled = true;
   try { await put(date, slot, v, id, null); await refresh(); }
   catch (e) { btn.disabled = false; alert(e.message); }
