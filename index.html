@@ -19,6 +19,8 @@
   【この画面ができないこと】
   - X へ投稿しない（投稿は翌朝の便が、もう一度検査を通してから出す）
   - 候補を作らない・消さない（読みと判定の更新だけ）
+    ○△ は「予約」。締切の1分前までは直す・取り消すができる
+  - 日記は今日の1行だけ書ける（xbot_diary。消せない。空にすれば素材にならない）
   - 自分の行以外は1行も読めない（RLS）
 -->
 <style>
@@ -94,6 +96,13 @@ input[type=email]{width:100%;min-height:46px;padding:10px;border-radius:10px;
 .expired-head{font-size:13px;color:var(--mid);margin:30px 0 10px;
   padding-top:14px;border-top:1px dashed var(--line)}
 .slot.expired .opt{opacity:.78}
+.rbtns{display:flex;gap:8px;margin:8px 0 0}
+.rbtns button{min-height:40px;font-size:14px}
+/* 今日の日記（2026-09-13）。夜の便が翌日の投稿の素材にする */
+.diary{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:12px 14px;margin:0 0 18px}
+.diary h3{font-size:13px;margin:0 0 6px;font-weight:650}
+.diary textarea{min-height:84px;margin:0}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -104,6 +113,14 @@ input[type=email]{width:100%;min-height:46px;padding:10px;border-radius:10px;
 
   <div class="next" id="next" hidden></div>
   <div class="warn" id="missed" hidden></div>
+
+  <div class="diary" id="diary" hidden>
+    <h3>今日の日記 <span class="deadline" id="diaryDate"></span></h3>
+    <textarea id="diaryText" maxlength="4000"
+      placeholder="気になったこと・今日あったことを一行でいい"></textarea>
+    <button class="save" id="diarySave">日記を保存</button>
+    <p class="note" id="diaryNote"></p>
+  </div>
 
   <div class="metrics" id="metrics" hidden>
     <div class="m"><b id="mAccept">—</b><span>採用率</span></div>
@@ -323,6 +340,13 @@ const lateVerdict = (r) => {
   return !r.decided_at || new Date(r.decided_at) > t.post;
 };
 const posted = (r) => (r.options || []).some((o) => o.posted_at);
+// 予約を直せるのは締切の1分前まで（2026-09-13）。締切を過ぎてから直すと
+// bot は「締切後の判定」として**予約ごと出さなくなる**ので、端末の時計の
+// ずれを見込んで手前で止める。
+const EDIT_MARGIN_MS = 60e3;
+const editable = (r) => { const t = timesOf(r);
+  return !!t && !posted(r) && Date.now() < t.post.getTime() - EDIT_MARGIN_MS; };
+let ROWS = [];
 const finalText = (r) => (r.verdict === "△" && r.final_text) ? r.final_text : pickedText(r);
 const fmt = (d) => d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo",
   month: "numeric", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" });
@@ -333,12 +357,20 @@ function renderNext(rows) {
   const next = ok.filter((r) => { const t = timesOf(r); return t && now <= t.end.getTime(); })
     .sort((a, b) => timesOf(a).post - timesOf(b).post);
   $("next").hidden = false;
-  $("next").innerHTML = `<h3>次の投稿予定</h3>` + (next.length
-    ? next.map((r) => `<div class="item">
+  $("next").innerHTML = `<h3>予約（次の投稿予定）</h3>` + (next.length
+    ? next.map((r) => `<div class="item" data-date="${r.date}" data-slot="${r.slot}">
         <div class="when">${esc(fmt(timesOf(r).post))}ごろ ・ ${esc(LABEL[r.slot] || r.slot)}</div>
-        <div class="body">${esc(finalText(r))}</div></div>`).join("")
-      + `<p class="note">GitHub の混雑で、この時刻より遅れて出ることがあります。</p>`
-    : `<p class="none">まだありません。締切までに ○ か △ を押すと、ここに出ます。</p>`);
+        <div class="body">${esc(finalText(r))}</div>
+        ${editable(r)
+          ? `<div class="rbtns"><button data-r="edit">直す</button><button data-r="cancel">取消</button></div>
+             <div data-redit hidden>
+               <textarea>${esc(finalText(r))}</textarea>
+               <button class="save" data-r="save">この文で予約する</button>
+             </div>`
+          : `<p class="note">締切の直前なので、もう直せません。このまま出ます。</p>`}
+      </div>`).join("")
+      + `<p class="note">締切の1分前まで直す・取り消すができます。GitHub の混雑で、この時刻より遅れて出ることがあります。</p>`
+    : `<p class="none">まだありません。締切までに ○ か △ を押すと、ここに予約されます。</p>`);
   // 締切までに決めたのに、枠が終わっても出た印が無い（直近1日だけ見る）
   const missed = ok.filter((r) => { const t = timesOf(r);
     return t && now > t.end.getTime() && now - t.end.getTime() < 24 * 3600e3; });
@@ -388,6 +420,7 @@ function section(r, isExpired) {
 }
 
 function render(rows) {
+  ROWS = rows;
   renderNext(rows);
   renderMetrics(rows);
   // 判定待ちは**何日経っても残す**（2026-09-13）。締切の前と後で分ける。
@@ -424,6 +457,79 @@ async function put(date, slot, verdict, choice, final) {
     }),
   });
 }
+
+// ── 予約を直す・取り消す（2026-09-13）──────────────────────────────
+// 取消は判定を空に戻す。decided_at には取消の時刻を残す——Issue に前に書いた
+// コメント（「朝 B1」など）が、次の便の取り込みで予約を生き返らせないように
+// （approve.py の collect は decided_at より前のコメントを読まない）。
+$("next").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-r]");
+  if (!btn) return;
+  const item = btn.closest("[data-date]");
+  const r = ROWS.find((x) => x.date === item.dataset.date && x.slot === item.dataset.slot);
+  if (!r) return;
+  const edit = item.querySelector("[data-redit]");
+  if (btn.dataset.r === "edit") { edit.hidden = !edit.hidden; return; }
+  if (!editable(r)) {
+    alert("締切の直前なので、もう直せません。このまま出ます。");
+    await refresh();
+    return;
+  }
+  const choice = r.choice || ((r.options || [])[0] || {}).id || null;
+  btn.disabled = true;
+  try {
+    if (btn.dataset.r === "cancel") {
+      if (!confirm("予約を取り消します。この枠は判定待ちに戻り、締切までに押し直さなければ出ません。")) {
+        btn.disabled = false; return;
+      }
+      await put(r.date, r.slot, null, null, null);
+    } else {
+      const t = item.querySelector("textarea").value.trim();
+      if (!t) { btn.disabled = false; return; }
+      const orig = ((r.options || []).find((o) => (o.id || "").toUpperCase()
+        === (choice || "").toUpperCase()) || {}).text;
+      // 元の本文に戻しただけなら ○（直していない）として残す
+      if (t === orig) await put(r.date, r.slot, "○", choice, null);
+      else await put(r.date, r.slot, "△", choice, t);
+    }
+    await refresh();
+  } catch (e) { btn.disabled = false; alert(e.message); }
+});
+
+// ── 今日の日記（2026-09-13）──────────────────────────────────────
+// 1日1行（xbot_diary）。夜の便（21:30）が diary/ と一緒に読み、
+// **翌日の投稿の素材**にする。書いた日の日付で保存する。
+const DIARY_NOTE = "21:30 の便より前に保存した分が、明日の投稿の素材になります。書かなくても投稿は止まりません。";
+async function loadDiary() {
+  const d = todayJST();
+  $("diary").hidden = false;
+  $("diaryDate").textContent = d;
+  try {
+    const got = await api(`${REST()}/xbot_diary?date=eq.${d}&select=text,updated_at`);
+    const row = (got || [])[0];
+    if (row && document.activeElement !== $("diaryText")) $("diaryText").value = row.text;
+    $("diaryNote").textContent = row
+      ? `保存済み（${fmt(new Date(row.updated_at))}）。` + DIARY_NOTE : DIARY_NOTE;
+  } catch (e) {
+    $("diarySave").disabled = true;
+    $("diaryNote").textContent = "日記の置き場所にまだつながりません"
+      + "（Ledger のマイグレーション待ちかもしれません）: " + e.message;
+  }
+}
+$("diarySave").onclick = async () => {
+  const btn = $("diarySave");
+  btn.disabled = true; btn.textContent = "保存中…";
+  try {
+    // user_id は送らない（表の既定値＝ログイン中の本人）。同じ日は上書き。
+    await api(`${REST()}/xbot_diary?on_conflict=user_id,date`, {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({ date: todayJST(), text: $("diaryText").value.trim() }),
+    });
+    await loadDiary();
+  } catch (e) { alert("保存できませんでした: " + e.message); }
+  btn.disabled = false; btn.textContent = "日記を保存";
+};
 
 $("list").addEventListener("click", async (ev) => {
   const btn = ev.target.closest("button");
@@ -478,7 +584,10 @@ async function refresh() {
   catch (e) {
     $("login").hidden = false;
     $("sub").textContent = "読み込めませんでした: " + e.message;
+    return;
   }
+  // 日記が読めなくても（表がまだ無くても）候補の画面は使えるようにする
+  await loadDiary();
 })();
 </script>
 </body>
