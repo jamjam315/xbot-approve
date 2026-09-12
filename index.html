@@ -58,6 +58,11 @@ h1{font-size:17px;margin:0 0 2px;letter-spacing:.02em}
 .opt.sel{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent)}
 .meta{color:var(--muted);font-size:12px;margin:0 0 8px}
 .body{white-space:pre-wrap;word-break:break-word;margin:0 0 12px}
+/* 採点は落とさない。指摘として見せるだけで、決めるのはJAM（2026-09-13） */
+.why{font-size:12px;line-height:1.6;margin:0 0 12px;padding:8px 10px;
+  border-radius:10px;background:color-mix(in srgb,var(--muted) 10%,transparent)}
+.why b{color:var(--mid);font-weight:600}
+.why span{color:var(--muted)}
 .btns{display:flex;gap:8px}
 button{flex:1;min-height:46px;border-radius:10px;border:1px solid var(--line);
   background:transparent;color:var(--fg);font-size:16px;font-weight:600;
@@ -288,9 +293,18 @@ function card(row, o) {
   const bits = [o.kind_name, o.theme ? "種「" + o.theme + "」" : null,
     (o.weighted_len || 0) + "字",
     o.score != null ? "機械 " + o.score + "点" : null].filter(Boolean);
+  // 機械の指摘は落とす理由ではなく、読むときの手がかり。
+  // 当たった観点があれば太字、無ければ「指摘なし」と出す（2026-09-13）。
+  const hits = o.gate_reasons || [];
+  const why = (o.score == null && !hits.length && !o.score_reason) ? "" :
+    `<div class="why">${hits.length
+      ? "<b>指摘: " + esc(hits.join(" / ")) + "</b>"
+      : "<span>機械の指摘はありません</span>"}${o.score_reason
+      ? `<br><span>${esc(o.score_reason)}</span>` : ""}</div>`;
   return `<div class="opt ${sel ? "sel" : ""}" data-opt="${esc(o.id)}">
     <div class="meta">${esc(o.id)} ・ ${esc(bits.join(" / "))}</div>
     <div class="body">${esc(o.text)}</div>
+    ${why}
     <div class="btns">
       ${["○", "△", "×"].map((v) => `<button data-v="${v}"
         class="${sel && (row.verdict === v || (v === "○" && row.verdict === "選")) ? "on" : ""}">${v}</button>`).join("")}
