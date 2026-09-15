@@ -499,7 +499,7 @@ $("next").addEventListener("click", async (ev) => {
 // ── 今日の日記（2026-09-13）──────────────────────────────────────
 // 1日1行（xbot_diary）。夜の便（21:30）が diary/ と一緒に読み、
 // **翌日の投稿の素材**にする。書いた日の日付で保存する。
-const DIARY_NOTE = "21:30 の便より前に保存した分が、明日の投稿の素材になります。書かなくても投稿は止まりません。";
+const DIARY_NOTE = "21:30 の便より前に保存した分が、明日の投稿の素材になります。書かない日は、明日の候補を作りません。";
 async function loadDiary() {
   const d = todayJST();
   $("diary").hidden = false;
