@@ -127,6 +127,7 @@ input[type=email]{width:100%;min-height:46px;padding:10px;border-radius:10px;
     <div class="m"><b id="mEdit">—</b><span>編集率</span></div>
     <div class="m"><b id="mJudged">—</b><span>判定した本数</span></div>
   </div>
+  <p class="note" id="mPhase" style="margin:-10px 0 16px"></p>
   <div class="warn" id="gap" hidden></div>
 
   <div id="setup" class="login" hidden>
@@ -296,7 +297,7 @@ const pickedText = (r) => {
   return (hit || opts[0] || {}).text || "";
 };
 
-function renderMetrics(rows) {
+function statsOf(rows) {
   let ok = 0, judged = 0, none = 0;
   const rates = [];
   for (const r of rows) {
@@ -306,11 +307,30 @@ function renderMetrics(rows) {
     else if (v === "×") { judged++; }
     else none++;
   }
+  const pct = (x) => Math.round(100 * x) + "%";
+  return { ok, judged, none,
+    accept: judged ? pct(ok / judged) : "—",
+    edit: rates.length ? pct(rates.reduce((a, b) => a + b, 0) / rates.length) : "—" };
+}
+
+// 1週目（カード無し）と2週目（カード有り）を混ぜない（2026-09-15）。
+// bot が候補に card（"v1" など）を書いている行が2週目。上の3つの箱は今の週、
+// 下の1行に1週目を並べる。基準値の確定は bot 側（x_state/style_baseline.json）。
+const cardOf = (r) => ((r.options || []).find((o) => o.card) || {}).card || null;
+
+function renderMetrics(rows) {
+  const w2 = rows.filter(cardOf), w1 = rows.filter((r) => !cardOf(r));
+  const cur = w2.length ? w2 : w1;
+  const s = statsOf(cur);
+  const { judged, none } = s;
   $("metrics").hidden = false;
-  $("mAccept").textContent = judged ? Math.round(100 * ok / judged) + "%" : "—";
-  $("mEdit").textContent = rates.length
-    ? Math.round(100 * rates.reduce((a, b) => a + b, 0) / rates.length) + "%" : "—";
+  $("mAccept").textContent = s.accept;
+  $("mEdit").textContent = s.edit;
   $("mJudged").textContent = judged + " 本";
+  const b = statsOf(w1);
+  $("mPhase").textContent = w2.length
+    ? `いま: 2週目（文体カード ${cardOf(w2[0])}）／ 1週目（カード無し）: 採用率 ${b.accept}・編集率 ${b.edit}（判定 ${b.judged}本）`
+    : "いま: 1週目（カード無し・基準値を取る週）";
   // 未反応は0%ではなく欠測。混ぜると1週目と2週目を比べられない
   $("gap").hidden = !(none > judged);
   $("gap").textContent = "未反応が " + none + " 本あります。"
